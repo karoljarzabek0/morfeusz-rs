@@ -15,6 +15,10 @@ use std::env;
 // FST
 use fst::{MapBuilder, Map};
 
+use memmap2::Mmap;
+
+use anyhow;
+
 fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
 where P: AsRef<Path>, {
     let file = File::open(filename)?;
@@ -39,7 +43,7 @@ fn load_btree(path: &str) -> BTreeMap<String, Vec<String>> {
 
     if let Ok(lines) = read_lines(path) {
         let mut i = 1;
-        
+
         for line in lines.flatten() {
             let record: Vec<&str> = line.split('\t').collect();
             if record.len() > 1 {
@@ -92,6 +96,42 @@ fn generate_fst(btree: &BTreeMap<String, Vec<String>>) {
     }
 
     fst_builder.finish().unwrap();
+}
+
+struct Dictionary {
+    index: Map<Mmap>,
+    data: Mmap,
+}
+
+impl Dictionary {
+    fn open() -> anyhow::Result<Self> {
+        let index_file = File::open("data/dict.fst")?;
+        let data_file = File::open("data/dict.data")?;
+        
+        Ok(Self {
+            index: Map::new(unsafe { Mmap::map(&index_file)? })?,
+            data: unsafe { Mmap::map(&data_file)? },
+        })
+    }
+
+    fn lookup(&self, word: &str) -> Vec<&str> {
+        let Some(packed) = self.index.get(word) else { return vec![]; };
+        
+        let offset = (packed >> 16) as usize;
+        let count = (packed & 0xFFFF) as usize;
+        
+        let mut results = Vec::with_capacity(count);
+        let mut ptr = offset;
+
+        for _ in 0..count {
+            // Find null terminator in the mmap'd data
+            let slice = &self.data[ptr..];
+            let len = slice.iter().position(|&b| b == 0).unwrap();
+            results.push(std::str::from_utf8(&slice[..len]).unwrap());
+            ptr += len + 1;
+        }
+        results
+    }
 }
 
 fn read_dictionary(path: &str) -> HashMap<String, String> {
@@ -149,7 +189,7 @@ fn prompt_loop(dictionary: &BTreeMap<String, Vec<String>>) {
     }
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
     if args.len() !=2 {
         eprintln!("Usage: {} <dic_path>", args[0]);
@@ -161,6 +201,23 @@ fn main() {
     
     generate_fst(&dictionary);
 
+    let dict = Dictionary::open()?;
+
+    // 2. Perform a lookup
+    let start = time::Instant::now();
+    let word = "bankowi";
+    let lemmas = dict.lookup(word);
+
+    if lemmas.is_empty() {
+        println!("'{}' not found.", word);
+    } else {
+        println!("Found {} for '{}': {:?}", lemmas.len(), word, lemmas);
+    }
+    let elapsed_time = start.elapsed();
+    println!("Lookup took {} seconds", elapsed_time.as_secs_f32());
+
     prompt_loop(&dictionary);
+
+    Ok(())
 
 }
