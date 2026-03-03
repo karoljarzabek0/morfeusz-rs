@@ -57,15 +57,8 @@ fn read_dictionary(path: &str) -> HashMap<String, String> {
     full_dictionary
 }
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() !=2 {
-        eprintln!("Usage: {} <dic_path>", args[0]);
-        panic!("Wrong");
-    }
-    let dictionary_path = &args[1];
-    let dictionary = read_dictionary(dictionary_path);
-    
+
+fn prompt_loop(dictionary: &HashMap<String, String>) {
     let mut term = String::new();
     loop {
         term.clear();
@@ -83,4 +76,17 @@ fn main() {
         let elapsed_time = start.elapsed();
         println!("Finiding lemma took {} seconds", elapsed_time.as_secs_f32())
     }
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() !=2 {
+        eprintln!("Usage: {} <dic_path>", args[0]);
+        panic!("Wrong");
+    }
+    let dictionary_path = &args[1];
+    let dictionary = read_dictionary(dictionary_path);
+    
+    prompt_loop(&dictionary);
+
 }
