@@ -35,21 +35,29 @@ fn count_lines(path: &str) -> io::Result<usize> {
 }
 
 fn load_btree(path: &str) -> BTreeMap<String, Vec<String>> {
-    let mut btree: BTreeMap<String, Vec<String>>  = BTreeMap::new();
+    let mut btree: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     if let Ok(lines) = read_lines(path) {
         let mut i = 1;
-
+        
         for line in lines.flatten() {
-            let record: Vec<&str> = line.split("\t").collect();
+            let record: Vec<&str> = line.split('\t').collect();
             if record.len() > 1 {
-            btree.entry(record[0].to_string())
-                .and_modify(|vec| vec.push(record[1].to_string()))
-                .or_insert(vec![record[1].to_string()]);
-            i += 1;
-            if i % 100_000 == 0 {
-                println!("{}", i);
-            }
+                let key = record[0].to_string();
+                let val = record[1].to_string();
+
+                btree.entry(key)
+                    .and_modify(|vec| {
+                        if !vec.contains(&val) {
+                            vec.push(val.clone());
+                        }
+                    })
+                    .or_insert(vec![val]);
+
+                i += 1;
+                if i % 100_000 == 0 {
+                    println!("{}", i);
+                }
             }
         }
     }
@@ -57,11 +65,11 @@ fn load_btree(path: &str) -> BTreeMap<String, Vec<String>> {
 }
 
 fn generate_fst(btree: &BTreeMap<String, Vec<String>>) {
-    let fst_file = File::create("dict.fst").unwrap();
+    let fst_file = File::create("data/dict.fst").unwrap();
     let fst_writer = BufWriter::new(fst_file);
     let mut fst_builder = MapBuilder::new(fst_writer).unwrap();
 
-    let data_file = File::create("dict.data").unwrap();
+    let data_file = File::create("data/dict.data").unwrap();
     let mut data_writer = BufWriter::new(data_file);
     
     let mut current_offset = 0u64;
@@ -151,6 +159,8 @@ fn main() {
     //let dictionary = read_dictionary(dictionary_path);
     let dictionary = load_btree(dictionary_path);
     
+    generate_fst(&dictionary);
+
     prompt_loop(&dictionary);
 
 }
