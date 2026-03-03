@@ -134,30 +134,6 @@ impl Dictionary {
     }
 }
 
-fn read_dictionary(path: &str) -> HashMap<String, String> {
-    let start = time::Instant::now();
-    let n_lines = count_lines(path).expect("Failed to count lines");
-
-    let mut full_dictionary: HashMap<String, String> = HashMap::with_capacity(n_lines);
-
-    if let Ok(lines) = read_lines(path) {
-        let mut i = 1;
-        for line in lines.flatten() {
-            let record: Vec<&str> = line.split("\t").collect();
-            if record.len() > 1 {
-            //println!("{:?}", record);
-            full_dictionary.insert(record[0].to_string(), record[1].to_string());
-            i += 1;
-            if i % 10_000 == 0 {
-                println!("{}", i);
-            }
-            }
-        }
-    }
-    let elapsed_time = start.elapsed();
-    println!("Full dictionary loaded in {} seconds", elapsed_time.as_secs_f32());
-    full_dictionary
-}
 
 
 fn prompt_loop(dictionary: &BTreeMap<String, Vec<String>>) {
