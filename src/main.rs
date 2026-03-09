@@ -1,86 +1,91 @@
-// Libraries for the file reader
-use std::fs::{File};
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::fs::File;
+use std::io;
+use fst::Map;
+use memmap2::Mmap;
+use anyhow::Result;
+use std::time::Instant;
 
-// Hashmap
-use std::collections::HashMap;
-
-// Time
-use std::time;
-
-// CLI args
-use std::env;
-
-
-fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
-where P: AsRef<Path>, {
-    let file = File::open(filename)?;
-    Ok(io::BufReader::new(file).lines())
+struct Dictionary {
+    fst: Map<Mmap>,
+    rule_sets: Mmap,
+    rules: Mmap,
+    rule_idx: Mmap,
 }
 
-fn count_lines(path: &str) -> io::Result<usize> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut count = 0;
-    let mut buffer = [0; 16384]; // 16KB buffer
+impl Dictionary {
+    fn open() -> Result<Self> {
+        let fst_file = File::open("data/dict.fst")?;
+        let rule_sets_file = File::open("data/rule_sets.bin")?;
+        let rules_file = File::open("data/rules.bin")?;
+        let rule_idx_file = File::open("data/rules.idx")?;
 
-    while let Ok(n) = reader.read(&mut buffer) {
-        if n == 0 { break; }
-        count += buffer[..n].iter().filter(|&&b| b == b'\n').count();
+        Ok(Self {
+            fst: Map::new(unsafe { Mmap::map(&fst_file)? })?,
+            rule_sets: unsafe { Mmap::map(&rule_sets_file)? },
+            rules: unsafe { Mmap::map(&rules_file)? },
+            rule_idx: unsafe { Mmap::map(&rule_idx_file)? },
+        })
     }
-    Ok(count)
-}
 
-fn read_dictionary(path: &str) -> HashMap<String, String> {
-    let start = time::Instant::now();
-    let n_lines = count_lines(path).expect("Failed to count lines");
+    fn lookup(&self, word: &str) -> Vec<String> {
+        let Some(set_offset) = self.fst.get(word) else { return vec![]; };
+        let set_offset = set_offset as usize;
 
-    let mut full_dictionary: HashMap<String, String> = HashMap::with_capacity(n_lines);
+        let count = self.rule_sets[set_offset] as usize;
+        let mut results = Vec::with_capacity(count);
 
-    if let Ok(lines) = read_lines(path) {
-        let mut i = 1;
-        for line in lines.flatten() {
-            let record: Vec<&str> = line.split("\t").collect();
-            if record.len() > 1 {
-            //println!("{:?}", record);
-            full_dictionary.insert(record[0].to_string(), record[1].to_string());
-            i += 1;
-            if i % 10_000 == 0 {
-                println!("{}", i);
-            }
+        for i in 0..count {
+            let id_ptr = set_offset + 1 + i * 4;
+            let rule_id = u32::from_le_bytes(self.rule_sets[id_ptr..id_ptr+4].try_into().unwrap()) as usize;
+
+            let idx_ptr = rule_id * 4;
+            let rule_offset = u32::from_le_bytes(self.rule_idx[idx_ptr..idx_ptr+4].try_into().unwrap()) as usize;
+
+            let strip = self.rules[rule_offset] as usize;
+            let add_ptr = rule_offset + 1;
+            let add_slice = &self.rules[add_ptr..];
+            let add_len = add_slice.iter().position(|&b| b == 0).unwrap();
+            let add_str = std::str::from_utf8(&add_slice[..add_len]).unwrap();
+
+            let chars: Vec<char> = word.chars().collect();
+            if chars.len() >= strip {
+                let mut lemma: String = chars[..chars.len() - strip].iter().collect();
+                lemma.push_str(add_str);
+                results.push(lemma);
             }
         }
+        results
     }
-    let elapsed_time = start.elapsed();
-    println!("Full dictionary loaded in {} seconds", elapsed_time.as_secs_f32());
-    full_dictionary
 }
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() !=2 {
-        eprintln!("Usage: {} <dic_path>", args[0]);
-        panic!("Wrong");
-    }
-    let dictionary_path = &args[1];
-    let dictionary = read_dictionary(dictionary_path);
-    
+fn main() -> Result<()> {
+    println!("Loading dictionary (mmap)...");
+    let dict = Dictionary::open()?;
+    println!("Dictionary loaded.");
+
     let mut term = String::new();
     loop {
         term.clear();
         println!("-----------------------------------");
         println!("Wpisz słowo, które chcesz wyszukać:");
 
-        io::stdin().read_line(&mut term).expect("Błąd w odczytywaniu słowa");
-        let start = time::Instant::now();
+        let bytes_read = io::stdin().read_line(&mut term)?;
+        if bytes_read == 0 { break; }
+        
         let term = term.trim();
+        if term.is_empty() { continue; }
 
-        let lemma = dictionary.get(term).map_or("Brak", |v| v.as_str());
+        let start = Instant::now();
+        let lemmas = dict.lookup(term);
 
-        println!("Słowo: \"{}\", Lemat: \"{}\"", term, lemma);
+        if lemmas.is_empty() {
+            println!("Słowo: \"{}\", Lemat: Brak", term);
+        } else {
+            println!("Słowo: \"{}\", Lematy: {:?}", term, lemmas);
+        }
 
-        let elapsed_time = start.elapsed();
-        println!("Finiding lemma took {} seconds", elapsed_time.as_secs_f32())
+        let elapsed = start.elapsed();
+        println!("Lookup took {:?} seconds", elapsed);
     }
+    Ok(())
 }
