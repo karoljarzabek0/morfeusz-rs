@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write, Seek, SeekFrom};
 use std::collections::{HashMap, BTreeSet};
 use fst::MapBuilder;
 use anyhow::Result;
@@ -49,14 +49,10 @@ fn main() -> Result<()> {
     println!("Deduplicating rule sets...");
     let mut rule_to_id = HashMap::new();
     let mut id_to_rule = Vec::new();
-    let mut rule_set_to_offset = HashMap::new();
-
-    let mut rule_set_file = BufWriter::new(File::create("data/rule_sets.bin")?);
-    let mut current_set_offset = 0u64;
+    let mut rule_set_to_rule_ids = HashMap::new();
 
     for rules in form_to_rules.values() {
-        if rule_set_to_offset.contains_key(rules) { continue; }
-
+        if rule_set_to_rule_ids.contains_key(rules) { continue; }
         let mut rule_ids = Vec::new();
         for rule in rules {
             let id = *rule_to_id.entry(rule.clone()).or_insert_with(|| {
@@ -65,48 +61,74 @@ fn main() -> Result<()> {
             });
             rule_ids.push(id);
         }
+        rule_set_to_rule_ids.insert(rules.clone(), rule_ids);
+    }
 
+    // --- PACKING START ---
+    let mut out_file = File::create("data/dictionary.bin")?;
+    out_file.write_all(&[0u8; 64])?; // Placeholder for header
+
+    // 1. Save Rules
+    let r_off = out_file.stream_position()?;
+    for (strip, add) in &id_to_rule {
+        out_file.write_all(&[*strip as u8])?;
+        out_file.write_all(add.as_bytes())?;
+        out_file.write_all(&[0])?;
+    }
+    let r_len = out_file.stream_position()? - r_off;
+
+    // 2. Save Rule Index
+    let ri_off = out_file.stream_position()?;
+    let mut current_rule_offset = 0u32;
+    for (_, add) in &id_to_rule {
+        out_file.write_all(&current_rule_offset.to_le_bytes())?;
+        current_rule_offset += (1 + add.as_bytes().len() + 1) as u32;
+    }
+    let ri_len = out_file.stream_position()? - ri_off;
+
+    // 3. Save Rule Sets
+    let rs_off = out_file.stream_position()?;
+    let mut rule_set_to_offset = HashMap::new();
+    let mut current_set_offset = 0u64;
+    for (rules, rule_ids) in &rule_set_to_rule_ids {
         rule_set_to_offset.insert(rules.clone(), current_set_offset);
-        
-        rule_set_file.write_all(&[rule_ids.len() as u8])?;
-        for &id in &rule_ids {
-            rule_set_file.write_all(&id.to_le_bytes())?;
+        out_file.write_all(&[rule_ids.len() as u8])?;
+        for &id in rule_ids {
+            out_file.write_all(&id.to_le_bytes())?;
         }
         current_set_offset += (1 + rule_ids.len() * 4) as u64;
     }
-    rule_set_file.flush()?;
+    let rs_len = out_file.stream_position()? - rs_off;
 
-    println!("Saving rules and rule index...");
-    let mut rule_file = BufWriter::new(File::create("data/rules.bin")?);
-    let mut rule_idx_file = BufWriter::new(File::create("data/rules.idx")?);
-    let mut current_rule_offset = 0u32;
-
-    for (strip, add) in &id_to_rule {
-        rule_idx_file.write_all(&current_rule_offset.to_le_bytes())?;
-        
-        rule_file.write_all(&[*strip as u8])?;
-        rule_file.write_all(add.as_bytes())?;
-        rule_file.write_all(&[0])?;
-        
-        current_rule_offset += (1 + add.as_bytes().len() + 1) as u32;
-    }
-    rule_idx_file.flush()?;
-    rule_file.flush()?;
-
-    println!("Building FST...");
+    // 4. Save FST
+    let fst_off = out_file.stream_position()?;
     let mut sorted_forms: Vec<_> = form_to_rules.keys().collect();
     sorted_forms.sort();
-
-    let fst_file = BufWriter::new(File::create("data/dict.fst")?);
-    let mut builder = MapBuilder::new(fst_file)?;
-
-    for form in sorted_forms {
-        let rules = &form_to_rules[form];
-        let offset = rule_set_to_offset[rules];
-        builder.insert(form, offset)?;
+    
+    // Use a scoped writer so we can flush it before getting final file position
+    {
+        let mut builder = MapBuilder::new(&out_file)?;
+        for form in sorted_forms {
+            let rules = &form_to_rules[form];
+            let offset = rule_set_to_offset[rules];
+            builder.insert(form, offset)?;
+        }
+        builder.finish()?;
     }
-    builder.finish()?;
+    let fst_len = out_file.stream_position()? - fst_off;
 
-    println!("Done!");
+    // 5. Finalize Header
+    println!("Finalizing header...");
+    out_file.seek(SeekFrom::Start(0))?;
+    out_file.write_all(&fst_off.to_le_bytes())?;
+    out_file.write_all(&fst_len.to_le_bytes())?;
+    out_file.write_all(&rs_off.to_le_bytes())?;
+    out_file.write_all(&rs_len.to_le_bytes())?;
+    out_file.write_all(&r_off.to_le_bytes())?;
+    out_file.write_all(&r_len.to_le_bytes())?;
+    out_file.write_all(&ri_off.to_le_bytes())?;
+    out_file.write_all(&ri_len.to_le_bytes())?;
+
+    println!("Done! Packed dictionary saved to data/dictionary.bin");
     Ok(())
 }
